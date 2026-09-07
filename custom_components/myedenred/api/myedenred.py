@@ -9,6 +9,9 @@ from .account import Account
 from .card import Card
 from .consts import (
     API_COMMON_PARAMS,
+    API_MOBILE_PARAMS,
+    SESSION_PROFILE_MOBILE,
+    SESSION_PROFILE_WEB,
     API_LOGIN_CHALLENGE_RESEND_URL,
     API_LOGIN_CHALLENGE_URL,
     API_LOGIN_URL,
@@ -131,10 +134,26 @@ def _log_response_diagnostics(res, json_body=None, had_authorization=False):
 class MY_EDENRED:
     """Interfaces to https://myedenred.pt/"""
 
-    def __init__(self, websession, cookies=None):
+    def __init__(self, websession, cookies=None, *, session_profile=SESSION_PROFILE_WEB):
         self.websession = websession
         self.json = None
-        self.cookies = cookies or {}
+        self.cookies = dict(cookies or {})
+        self.session_profile = session_profile
+
+    @property
+    def request_params(self):
+        """Keep the client profile consistent with the saved session token."""
+        if self.session_profile == SESSION_PROFILE_MOBILE:
+            return dict(API_MOBILE_PARAMS)
+        return dict(API_COMMON_PARAMS)
+
+    def _session_payload(self, body):
+        """Return response data with a detached snapshot of session state."""
+        return {
+            **_data_payload(body),
+            "cookies": dict(self.cookies),
+            "session_profile": self.session_profile,
+        }
 
     def _cookie_header(self):
         """Return stored cookies as a HTTP Cookie header."""
@@ -183,7 +202,7 @@ class MY_EDENRED:
                 _LOGGER.debug("MyEdenred 401: set_cookie=%s", set_cookie)
                 # The API may signal a required 2FA challenge in the 401 body.
                 if _challenge_id_from(json.get("data") if isinstance(json, dict) else None):
-                    raise MyEdenredChallengeRequired(json.get("data"))
+                    raise MyEdenredChallengeRequired(self._session_payload(json))
                 raise MyEdenredAuthError("MyEdenred authentication failed")
             message = json.get("message", "MyEdenred API request failed") if isinstance(json, dict) else "MyEdenred API request failed"
             raise MyEdenredError(message)
@@ -192,15 +211,18 @@ class MY_EDENRED:
         """Issue LOGIN request."""
         try:
             _LOGGER.debug("Logging in...")
+            payload = {"userId": username, "password": password}
+            if self.session_profile == SESSION_PROFILE_MOBILE:
+                # LoginRequestData defaults rememberMe to true in Android 4.2.5.
+                payload["rememberMe"] = True
             json = await self._request_json(
                 "POST",
                 API_LOGIN_URL,
-                params=API_COMMON_PARAMS,
+                params=self.request_params,
                 headers=self._headers(),
-                json={"userId": username, "password": password},
+                json=payload,
             )
-            data = _data_payload(json)
-            data["cookies"] = self.cookies
+            data = self._session_payload(json)
             if _challenge_id_from(data):
                 raise MyEdenredChallengeRequired(data)
             if data.get("token"):
@@ -227,7 +249,7 @@ class MY_EDENRED:
             json = await self._request_json(
                 "POST",
                 API_LOGIN_CHALLENGE_URL,
-                params=API_COMMON_PARAMS,
+                params=self.request_params,
                 headers=self._headers(),
                 json={
                     "userId": username,
@@ -236,8 +258,11 @@ class MY_EDENRED:
                     "token": code,
                 },
             )
-            data = _data_payload(json)
-            data["cookies"] = self.cookies
+            # Android MfaOtpChallengeScreen leaves rememberMe unset on the
+            # challenge request; the initial login already selected it.
+            data = self._session_payload(json)
+            if _challenge_id_from(data):
+                raise MyEdenredChallengeRequired(data)
             if data.get("token"):
                 _log_token_expiry(data["token"])
                 return data
@@ -257,12 +282,11 @@ class MY_EDENRED:
             json = await self._request_json(
                 "POST",
                 API_LOGIN_CHALLENGE_RESEND_URL,
-                params=API_COMMON_PARAMS,
+                params=self.request_params,
                 headers=self._headers(),
                 json={"authenticationMfaProcessId": challenge_id},
             )
-            data = _data_payload(json)
-            data["cookies"] = self.cookies
+            data = self._session_payload(json)
             if _challenge_id_from(data):
                 _LOGGER.debug("Done requesting a new 2FA code.")
                 raise MyEdenredChallengeRequired(data)
@@ -280,7 +304,7 @@ class MY_EDENRED:
                 "GET",
                 API_LIST_URL,
                 token=token,
-                params=API_COMMON_PARAMS,
+                params=self.request_params,
                 headers=self._headers(token),
             )
             _LOGGER.debug("Done getting list of available cards.")
@@ -298,7 +322,7 @@ class MY_EDENRED:
                 "GET",
                 API_ACCOUNTMOVEMENT_URL.format(cardId),
                 token=token,
-                params=API_COMMON_PARAMS,
+                params=self.request_params,
                 headers=self._headers(token),
             )
             _LOGGER.debug("Done getting card details and their movements.")

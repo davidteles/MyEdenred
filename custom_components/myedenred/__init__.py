@@ -12,6 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api.myedenred import MY_EDENRED, MyEdenredAuthError, MyEdenredError
 from .coordinator import MyEdenredDataUpdateCoordinator
 from .const import DOMAIN
+from .api.consts import SESSION_PROFILE_WEB
 
 __version__ = json.loads(Path(__file__).with_name("manifest.json").read_text(encoding="utf-8"))["version"]
 _LOGGER = logging.getLogger(__name__)
@@ -25,7 +26,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     session = async_get_clientsession(hass, True)
     config = entry.data
-    api = MY_EDENRED(session, config.get("cookies"))
+    api = MY_EDENRED(
+        session,
+        config.get("cookies"),
+        session_profile=config.get("session_profile", SESSION_PROFILE_WEB),
+    )
     token = config.get("token")
 
     if not token:

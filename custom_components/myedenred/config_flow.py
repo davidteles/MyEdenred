@@ -18,6 +18,7 @@ from .api.myedenred import (
     MyEdenredError,
 )
 from .const import DOMAIN
+from .api.consts import SESSION_PROFILE_MOBILE
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.DEBUG)
@@ -67,6 +68,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.debug("Config is valid!")
                 user_input["token"] = result["token"]
                 user_input["cookies"] = result.get("cookies", {})
+                user_input["session_profile"] = result["session_profile"]
                 return self.async_create_entry(
                     title="MyEdenred " + user_input["username"],
                     data=user_input,
@@ -89,7 +91,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             session = async_get_clientsession(self.hass, True)
-            api = MY_EDENRED(session, self._pending_challenge.get("cookies"))
+            api = MY_EDENRED(
+                session,
+                self._pending_challenge.get("cookies"),
+                session_profile=self._pending_challenge.get(
+                    "session_profile", SESSION_PROFILE_MOBILE
+                ),
+            )
 
             if user_input.get("resend_code"):
                 try:
@@ -122,8 +130,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._pending_challenge,
                         user_input["code"],
                     )
-            except MyEdenredChallengeRequired:
+            except MyEdenredChallengeRequired as err:
                 # A rejected code makes the API issue a fresh challenge.
+                self._pending_challenge = err.challenge
                 _LOGGER.error("MyEdenred rejected the 2FA code and issued a new challenge")
                 errors = {"base": "invalid_code"}
             except MyEdenredAuthError as err:
@@ -147,6 +156,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 data["token"] = result["token"]
                 data["cookies"] = result.get("cookies", {})
+                data["session_profile"] = result["session_profile"]
                 if self._reauth_entry:
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry,
@@ -206,6 +216,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     **self._pending_user_input,
                     "token": result["token"],
                     "cookies": result.get("cookies", {}),
+                    "session_profile": result["session_profile"],
                 }
                 self.hass.config_entries.async_update_entry(
                     self._reauth_entry, data=data
@@ -234,8 +245,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if isinstance(result, dict) and result.get("token"):
             data = {
                 **entry_data,
+                **self._pending_user_input,
                 "token": result["token"],
                 "cookies": result.get("cookies", {}),
+                "session_profile": result["session_profile"],
             }
             self.hass.config_entries.async_update_entry(self._reauth_entry, data=data)
             await self.hass.config_entries.async_reload(self._reauth_entry.entry_id)
@@ -257,7 +270,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _authenticate(self, user_input, cookies=None):
         """Return authentication data, a challenge marker, or an error key."""
         session = async_get_clientsession(self.hass, True)
-        api = MY_EDENRED(session, cookies)
+        # New logins request the mobile remember-me session. Existing tokens
+        # retain their old profile until this flow completes successfully.
+        api = MY_EDENRED(session, cookies, session_profile=SESSION_PROFILE_MOBILE)
         try:
             async with async_timeout.timeout(AUTH_TIMEOUT_SECONDS):
                 return await api.authenticate(
